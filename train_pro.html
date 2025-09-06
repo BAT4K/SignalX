@@ -129,9 +129,9 @@
 
         <section id="active-section" style="display:none;">
             <div class="dashboard-section">
-                <h2>Live Train Status</h2>
+                <h2>Active Train Roster (Live Simulation)</h2>
                 <table>
-                    <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Direction</th><th>Scheduled Time (min)</th></tr></thead>
+                    <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Speed (km/h)</th><th>Journey</th></tr></thead>
                     <tbody id="train-table-body"></tbody>
                 </table>
             </div>
@@ -202,21 +202,15 @@
                 LOCAL: { name: 'LOCAL', color: 'bg-blue-500', priority: 2, speed: 3.0, acceleration: 0.08 },
                 FREIGHT: { name: 'FREIGHT', color: 'bg-green-600', priority: 1, speed: 2.0, acceleration: 0.03 }
             };
-
             let trackLayout = {
-                // *** STATION NAMES UPDATED HERE ***
-                stations: [
-                    { id: 'STN-A', name: 'New Delhi Rlway Station', position: 50 },
-                    { id: 'STN-B', name: 'Kalkaji', position: 500 },
-                    { id: 'STN-C', name: 'Old Delhi', position: 950 }
-                ],
+                stations: [ { id: 'STN-A', name: 'New Delhi Rlway Station', position: 50 }, { id: 'STN-B', name: 'Kalkaji', position: 500 }, { id: 'STN-C', name: 'Old Delhi', position: 950 } ],
                 crossovers: [ { id: 'c1', position: 250, tracks: [0, 1] }, { id: 'c2', position: 450, tracks: [0, 1] }, { id: 'c3', position: 550, tracks: [0, 1] }, { id: 'c4', position: 750, tracks: [0, 1] }, { id: 'c5', position: 250, tracks: [2, 3] }, { id: 'c6', position: 450, tracks: [2, 3] }, { id: 'c7', position: 550, tracks: [2, 3] }, { id: 'c8', position: 750, tracks: [2, 3] } ],
                 tracks: [ { id: 0, type: 'MAIN', direction: 'West' }, { id: 1, type: 'LOOP', direction: 'West' }, { id: 2, type: 'LOOP', direction: 'East' }, { id: 3, type: 'MAIN', direction: 'East' } ] 
             };
             let simulationTime = 0, trains = [], kpiStats = { throughput: 0, overtakes: 0 }, isPaused = false;
             let tickCounter = 0, slowZoneEvent = null, lastWeatherEventTime = -1000, lastFaultTime = -1000;
             let scheduledTrainIds = new Set();
-
+            window.liveSimulationData = { getTrains: () => trains, TRACK_LENGTH: TRACK_LENGTH };
             const ui = {
                 trackContainer: document.getElementById('track-container'), logContainer: document.getElementById('log-container'), 
                 trainList: document.getElementById('train-list-container'), efficiency: document.getElementById('kpi-efficiency'), throughput: document.getElementById('kpi-throughput'),
@@ -227,55 +221,13 @@
                 simulateDelayBtn: document.getElementById('simulate-delay-btn'),
                 simulateOpDelayBtn: document.getElementById('simulate-op-delay-btn'),
             };
-            
             class Train {
                  constructor({ id, name, type, direction }) {
-                    this.id = id;
-                    this.name = name;
-                    this.type = TRAIN_TYPES[type]; this.direction = direction;
-                    this.position = -999; this.actualStartTime = null; this.speed = 0; this.maxSpeed = this.type.speed;
-                    this.state = 'HOLDING'; this.delay = 0; this.basePriority = this.type.priority; this.priority = this.type.priority;
-                    this.track = this.direction === 'East' ? 3 : 0; this.originalTrack = this.track; this.domElement = null;
-                    this.reroutePlan = null; this.isCritical = false; this.passingTrainId = null;
-                    this.disruptionTimer = 0;
-                    this.operationalDelayTimer = 0; // For signal delays
+                    this.id = id; this.name = name; this.type = TRAIN_TYPES[type]; this.direction = direction; this.position = -999; this.actualStartTime = null; this.speed = 0; this.maxSpeed = this.type.speed; this.state = 'HOLDING'; this.delay = 0; this.basePriority = this.type.priority; this.priority = this.type.priority; this.track = this.direction === 'East' ? 3 : 0; this.originalTrack = this.track; this.domElement = null; this.reroutePlan = null; this.isCritical = false; this.passingTrainId = null; this.disruptionTimer = 0; this.operationalDelayTimer = 0;
                 }
                 start() { if (this.state === 'HOLDING') { this.state = 'RUNNING'; this.actualStartTime = simulationTime; this.position = this.direction === 'East' ? 0 : TRACK_LENGTH; log(`AI: Train ${this.id} released onto track ${this.track}.`, 'system'); } }
-                update(deltaTime) {
-                    if (this.state === 'HOLDING') return;
-                    if (this.disruptionTimer > 0) { this.disruptionTimer -= deltaTime; if (this.disruptionTimer <= 0) { this.disruptionTimer = 0; if(this.domElement) this.domElement.classList.remove('train-disrupted'); log(`Tech issue resolved for ${this.id}.`, 'info'); } }
-                    if (this.operationalDelayTimer > 0) { this.operationalDelayTimer -= deltaTime; if (this.operationalDelayTimer <= 0) { this.operationalDelayTimer = 0; log(`SIGNAL: Signal cleared for ${this.id}.`, 'info'); } }
-                    
-                    let maxSpeedForZone = this.maxSpeed;
-                    if (slowZoneEvent && this.track === slowZoneEvent.track && this.position >= slowZoneEvent.start && this.position <= slowZoneEvent.end) { maxSpeedForZone *= slowZoneEvent.speedFactor; }
-                    
-                    let targetSpeed = maxSpeedForZone;
-                    if (this.operationalDelayTimer > 0) { targetSpeed *= 0.1; } // Drastically slow down for signal wait
-                    if (this.state === 'STOP_OVER' || this.disruptionTimer > 0) { targetSpeed = 0; }
-                    
-                    const aheadTrain = getAheadTrain(this);
-                    if (aheadTrain) { const distance = Math.abs(this.position - aheadTrain.position); if(distance < SAFE_DISTANCE) { targetSpeed = 0; } else if (distance < SAFE_DISTANCE * 1.5) { targetSpeed = Math.min(targetSpeed, aheadTrain.speed * 0.8); } } 
-                    else if (this.state === 'HALTED') { this.state = 'RUNNING'; }
-                    
-                    if (this.speed < targetSpeed) this.speed = Math.min(targetSpeed, this.speed + this.type.acceleration * deltaTime);
-                    else if (this.speed > targetSpeed) this.speed = Math.max(targetSpeed, this.speed - (this.type.acceleration * 3) * deltaTime); 
-                    if(this.speed < 0.01) this.speed = 0;
-                    
-                    if (this.state !== 'STOP_OVER') { if (this.speed === 0 && (aheadTrain || this.disruptionTimer > 0 || this.operationalDelayTimer > 0)) { this.state = 'HALTED'; } else if (this.speed > 0) { this.state = 'RUNNING'; } }
-                    this.position += this.speed * deltaTime * (this.direction === 'East' ? 1 : -1);
-                    
-                    if (this.actualStartTime) { const idealTime = Math.abs(this.position - (this.direction === 'East' ? 0 : TRACK_LENGTH)) / this.maxSpeed; this.delay = Math.max(0, (simulationTime - this.actualStartTime - idealTime)); }
-                    this.isCritical = this.type.name === 'EXPRESS' && this.delay > 120;
-                    this.priority = this.basePriority + (this.delay / 60) + (this.isCritical ? 10 : 0);
-                    
-                    if (this.reroutePlan && Math.abs(this.position - this.reroutePlan.crossover.position) < 10) {
-                        log(`AI: ${this.id} executing switch to Track ${this.reroutePlan.toTrack}.`, 'system'); this.track = this.reroutePlan.toTrack;
-                        if (this.reroutePlan.reason === 'OVERTAKE' && this.track !== this.originalTrack) { kpiStats.overtakes++; }
-                        if (this.reroutePlan.stopOnArrival) { this.state = 'STOP_OVER'; } this.reroutePlan = null;
-                    }
-                }
+                update(deltaTime) { if (this.state === 'HOLDING') return; if (this.disruptionTimer > 0) { this.disruptionTimer -= deltaTime; if (this.disruptionTimer <= 0) { this.disruptionTimer = 0; if(this.domElement) this.domElement.classList.remove('train-disrupted'); log(`Tech issue resolved for ${this.id}.`, 'info'); } } if (this.operationalDelayTimer > 0) { this.operationalDelayTimer -= deltaTime; if (this.operationalDelayTimer <= 0) { this.operationalDelayTimer = 0; log(`SIGNAL: Signal cleared for ${this.id}.`, 'info'); } } let maxSpeedForZone = this.maxSpeed; if (slowZoneEvent && this.track === slowZoneEvent.track && this.position >= slowZoneEvent.start && this.position <= slowZoneEvent.end) { maxSpeedForZone *= slowZoneEvent.speedFactor; } let targetSpeed = maxSpeedForZone; if (this.operationalDelayTimer > 0) { targetSpeed *= 0.1; } if (this.state === 'STOP_OVER' || this.disruptionTimer > 0) { targetSpeed = 0; } const aheadTrain = getAheadTrain(this); if (aheadTrain) { const distance = Math.abs(this.position - aheadTrain.position); if(distance < SAFE_DISTANCE) { targetSpeed = 0; } else if (distance < SAFE_DISTANCE * 1.5) { targetSpeed = Math.min(targetSpeed, aheadTrain.speed * 0.8); } } else if (this.state === 'HALTED') { this.state = 'RUNNING'; } if (this.speed < targetSpeed) this.speed = Math.min(targetSpeed, this.speed + this.type.acceleration * deltaTime); else if (this.speed > targetSpeed) this.speed = Math.max(targetSpeed, this.speed - (this.type.acceleration * 3) * deltaTime); if(this.speed < 0.01) this.speed = 0; if (this.state !== 'STOP_OVER') { if (this.speed === 0 && (aheadTrain || this.disruptionTimer > 0 || this.operationalDelayTimer > 0)) { this.state = 'HALTED'; } else if (this.speed > 0) { this.state = 'RUNNING'; } } this.position += this.speed * deltaTime * (this.direction === 'East' ? 1 : -1); if (this.actualStartTime) { const idealTime = Math.abs(this.position - (this.direction === 'East' ? 0 : TRACK_LENGTH)) / this.maxSpeed; this.delay = Math.max(0, (simulationTime - this.actualStartTime - idealTime)); } this.isCritical = this.type.name === 'EXPRESS' && this.delay > 120; this.priority = this.basePriority + (this.delay / 60) + (this.isCritical ? 10 : 0); if (this.reroutePlan && Math.abs(this.position - this.reroutePlan.crossover.position) < 10) { log(`AI: ${this.id} executing switch to Track ${this.reroutePlan.toTrack}.`, 'system'); this.track = this.reroutePlan.toTrack; if (this.reroutePlan.reason === 'OVERTAKE' && this.track !== this.originalTrack) { kpiStats.overtakes++; } if (this.reroutePlan.stopOnArrival) { this.state = 'STOP_OVER'; } this.reroutePlan = null; } }
             }
-            
             function createTrain(config) { if (trains.length >= MAX_TRAINS) { log('Cannot schedule: Maximum trains on network.', 'warn'); return; } const newTrain = new Train(config); trains.push(newTrain); log(`TIMETABLE: ${newTrain.id} (${newTrain.name}) scheduled, awaiting clear track.`, 'dispatch'); }
             function scheduleChecker() { if (typeof trainSchedule === 'undefined') { return; } for (const trainData of trainSchedule) { if (simulationTime >= trainData.scheduledTime && !scheduledTrainIds.has(trainData.id)) { createTrain(trainData); scheduledTrainIds.add(trainData.id); } } }
             function scheduleRandomWeatherEvent() { if (isPaused || slowZoneEvent || simulationTime - lastWeatherEventTime < 2000) return; if (Math.random() < 0.005) { const trackId = Math.random() > 0.5 ? 0 : 3; const startPos = 100 + Math.random() * 200; slowZoneEvent = { start: startPos, end: startPos + 400 + Math.random() * 200, track: trackId, speedFactor: 0.4, end: simulationTime + (1000 + Math.random() * 1000) }; log(`WEATHER: Heavy rain on track ${trackId}, speed restricted.`, 'alert'); lastWeatherEventTime = simulationTime; } }
@@ -296,15 +248,12 @@
             function log(message, type = 'info') { const colors={info:'border-blue-500',warn:'border-yellow-500',error:'border-red-500',system:'border-cyan-500', dispatch: 'border-gray-400', alert: 'border-yellow-500'}; const e=document.createElement('div'); const simTimeStr = `${String(Math.floor(simulationTime/3600)).padStart(2,'0')}:${String(Math.floor((simulationTime%3600)/60)).padStart(2,'0')}`; e.className=`log-entry ${colors[type]} p-2 mb-2 bg-gray-50 rounded-r-md text-sm`; e.dataset.logType = (type==='warn' || type==='error' || type ==='alert') ? 'alert' : ((type==='info' || type==='dispatch') ? 'all' : 'system'); e.innerHTML=`<span class="font-mono text-gray-400 mr-2">[${simTimeStr}]</span> ${message}`; ui.logContainer.prepend(e); if(ui.logContainer.children.length > 100) ui.logContainer.removeChild(ui.logContainer.lastChild); }
             function resetSimulation() { trains.forEach(t => { if(t.domElement) t.domElement.remove(); }); trains = []; kpiStats = { throughput: 0, overtakes: 0 }; simulationTime = 0; slowZoneEvent = null; scheduledTrainIds.clear(); log('--- SIMULATION RESET ---', 'system'); log('Timetable loaded. Waiting for scheduled departures.', 'system'); }
             function gameLoop() { const deltaTime = (TICK_INTERVAL / 1000) * TIME_MULTIPLIER; if(!isPaused) { simulationTime += deltaTime; tickCounter++; scheduleChecker(); scheduleRandomWeatherEvent(); scheduleRandomTechFault(); aiGatekeeper(); trains.forEach(t => t.update(deltaTime)); const trainsToRemove = trains.filter(t => (t.direction==='East'&&t.position>=TRACK_LENGTH+50)||(t.direction==='West'&&t.position<=-50)); if(trainsToRemove.length>0){trainsToRemove.forEach(t=>{kpiStats.throughput++;log(`${t.id} completed journey.`,'dispatch');if(t.domElement)t.domElement.remove();});trains=trains.filter(t=>!trainsToRemove.includes(t));} runScheduler(); } updateUI(); requestAnimationFrame(gameLoop); }
-            
-            // --- Event Listeners ---
             ui.slowZoneBtn.addEventListener('click', () => { if (slowZoneEvent) return; const trackId = Math.random() > 0.5 ? 0 : 3; const startPos = 100 + Math.random() * 200; slowZoneEvent = { start: startPos, end: startPos + 400, track: trackId, speedFactor: 0.4, end: simulationTime + 1000 }; log(`WEATHER: Heavy rain reported on track ${trackId}.`, 'alert'); });
             ui.simulateDelayBtn.addEventListener('click', () => { const runningTrains = trains.filter(t => t.state === 'RUNNING' || t.state === 'HALTED'); if (runningTrains.length > 0) { const targetTrain = runningTrains[Math.floor(Math.random() * runningTrains.length)]; targetTrain.disruptionTimer = 300 + Math.random() * 300; log(`DISRUPTION: ${targetTrain.id} has a technical fault.`, 'alert'); } });
             ui.simulateOpDelayBtn.addEventListener('click', () => { const runningTrains = trains.filter(t => t.state === 'RUNNING' && t.operationalDelayTimer <= 0 && t.disruptionTimer <= 0); if (runningTrains.length > 0) { const targetTrain = runningTrains[Math.floor(Math.random() * runningTrains.length)]; targetTrain.operationalDelayTimer = 200 + Math.random() * 200; log(`SIGNAL: ${targetTrain.id} is being held at a signal.`, 'alert'); } else { log('SIGNAL: No running trains available to delay.', 'warn'); } });
             ui.resetSimBtn.addEventListener('click', resetSimulation);
             ui.togglePauseBtn.addEventListener('click', () => { isPaused=!isPaused; ui.togglePauseBtn.innerHTML=isPaused?`<i class="fas fa-play"></i> Resume`:`<i class="fas fa-pause"></i> Pause`; log(`Simulation ${isPaused?'Paused':'Resumed'}.`,'info'); });
             document.getElementById('log-filter-group').addEventListener('click', (e) => { if(e.target.tagName==='BUTTON'){ const filter=e.target.dataset.filter; document.querySelectorAll('.log-filter-btn').forEach(b=>b.classList.remove('active')); e.target.classList.add('active'); document.querySelectorAll('.log-entry').forEach(entry=>{ const type = entry.dataset.logType; let show = false; if (filter === 'all' || type === filter) { show = true; } if (filter === 'alert' && (type === 'warn' || type === 'error' || type === 'alert')) { show = true; } if (filter === 'system' && type === 'system') { show = true; } entry.style.display = show ? '' : 'none'; }); } });
-            
             function init() { if (typeof trainSchedule === 'undefined') { console.log("Waiting for train schedule to load..."); setTimeout(init, 100); return; } log('Initializing AI Traffic Control System...', 'system'); setupUI(); resetSimulation(); requestAnimationFrame(gameLoop); }
             if(document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
         })();
@@ -313,17 +262,83 @@
         (() => {
             const datetimeEl = document.getElementById('datetime');
             setInterval(() => { datetimeEl.textContent = new Date().toLocaleString('en-IN', { dateStyle: 'full', timeStyle: 'medium'}); }, 1000);
+            
+            const stationCoordinates = {
+                "New Delhi Rlway Station": { lat: 28.642, lon: 77.222, zoom: 15 },
+                "Old Delhi": { lat: 28.665, lon: 77.232, zoom: 15 },
+                "Kalkaji": { lat: 28.549, lon: 77.258, zoom: 16 }
+            };
+
             let map;
-            try { map = L.map('map').setView([28.6304, 77.219], 11); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(map); } catch (e) { console.error("Leaflet map could not be initialized.", e); document.getElementById('map').innerHTML = '<p class="text-center p-4">Map could not be loaded.</p>'; }
+            try { map = L.map('map').setView([28.6304, 77.219], 12); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(map); } catch (e) { console.error("Leaflet map could not be initialized.", e); document.getElementById('map').innerHTML = '<p class="text-center p-4">Map could not be loaded.</p>'; }
+            
             function getTypeFull(type) { return { 'EXPRESS': 'Express', 'LOCAL': 'Local', 'FREIGHT': 'Freight' }[type] || type; }
-            function displayLiveTrainDashboard() { const tbody = document.getElementById("train-table-body"); tbody.innerHTML = ""; let expCount = 0, locCount = 0, frgCount = 0; trainSchedule.forEach(train => { const row = document.createElement('tr'); row.innerHTML = `<td>${train.id}</td><td>${train.name}</td><td>${getTypeFull(train.type)}</td><td>${train.direction}</td><td>${train.scheduledTime}</td>`; tbody.appendChild(row); if (train.type === 'EXPRESS') expCount++; else if (train.type === 'LOCAL') locCount++; else if (train.type === 'FREIGHT') frgCount++; }); document.getElementById('expCount').textContent = expCount; document.getElementById('locCount').textContent = locCount; document.getElementById('frgCount').textContent = frgCount; }
-            function displayIncomingTrains(stationName) { const container = document.getElementById('incoming-trains-container'); const title = document.getElementById('incoming-title'); title.textContent = `Scheduled Departures Relevant to ${stationName}`; container.innerHTML = ''; const relevantDirection = stationName === 'Old Delhi' ? 'East' : 'West'; const trains = trainSchedule.filter(t => t.direction === relevantDirection); if (!trains.length) { container.innerHTML = '<p>No scheduled trains found for this direction.</p>'; return; } const table = document.createElement('table'); table.innerHTML = '<thead><tr><th>Train Name</th><th>Number</th><th>Scheduled At (min)</th><th>Direction</th></tr></thead>'; const tbody = document.createElement('tbody'); trains.forEach(train => { const row = document.createElement('tr'); row.innerHTML = `<td>${train.name}</td><td>${train.id}</td><td>${train.scheduledTime}</td><td>${train.direction}</td>`; tbody.appendChild(row); }); table.appendChild(tbody); container.appendChild(table); }
+            
+            function displayLiveTrainDashboard() { const tbody = document.getElementById("train-table-body"); if (!window.liveSimulationData) { tbody.innerHTML = '<tr><td colspan="5">Simulation not initialized yet.</td></tr>'; return; } const liveTrains = window.liveSimulationData.getTrains(); const TRACK_LENGTH = window.liveSimulationData.TRACK_LENGTH; tbody.innerHTML = ""; let expCount = 0, locCount = 0, frgCount = 0; const activeTrains = liveTrains.filter(t => t.state !== 'HOLDING'); if (activeTrains.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center">No active trains on the network.</td></tr>'; } activeTrains.forEach(train => { const row = document.createElement('tr'); let stateText = train.state; if (train.disruptionTimer > 0) stateText = 'FAULT'; else if (train.operationalDelayTimer > 0) stateText = 'SIGNAL WAIT'; else if (train.reroutePlan) stateText = 'REROUTING'; const journeyPercentage = train.direction === 'East' ? (train.position / TRACK_LENGTH * 100) : ( (TRACK_LENGTH - train.position) / TRACK_LENGTH * 100); row.innerHTML = `<td>${train.id}</td><td>${getTypeFull(train.type.name)}</td><td>${stateText}</td><td>${(train.speed * 50).toFixed(0)}</td><td>${Math.max(0, Math.min(100, journeyPercentage)).toFixed(1)}%</td>`; tbody.appendChild(row); if (train.type.name === 'EXPRESS') expCount++; else if (train.type.name === 'LOCAL') locCount++; else if (train.type.name === 'FREIGHT') frgCount++; }); document.getElementById('expCount').textContent = expCount; document.getElementById('locCount').textContent = locCount; document.getElementById('frgCount').textContent = frgCount; }
+            function displayIncomingTrains(stationName) { const container = document.getElementById('incoming-trains-container'); const title = document.getElementById('incoming-title'); title.textContent = `Scheduled Departures Relevant to ${stationName}`; container.innerHTML = ''; let trains; if (stationName === 'Kalkaji') { trains = trainSchedule; title.textContent = `Full Schedule (via Kalkaji Central Yard)`; } else { const relevantDirection = stationName === 'Old Delhi' ? 'East' : 'West'; trains = trainSchedule.filter(t => t.direction === relevantDirection); } if (!trains.length) { container.innerHTML = '<p>No scheduled trains found.</p>'; return; } const table = document.createElement('table'); table.innerHTML = '<thead><tr><th>Train Name</th><th>Number</th><th>Scheduled At (min)</th><th>Direction</th></tr></thead>'; const tbody = document.createElement('tbody'); trains.forEach(train => { const row = document.createElement('tr'); row.innerHTML = `<td>${train.name}</td><td>${train.id}</td><td>${train.scheduledTime}</td><td>${train.direction}</td>`; tbody.appendChild(row); }); table.appendChild(tbody); container.appendChild(table); }
+
             function populateStationSidebar() { 
-                // *** STATION NAMES UPDATED HERE FOR DASHBOARD SIDEBAR ***
-                const stations = [{ name: 'Old Delhi' }, { name: 'New Delhi Rlway Station' }]; 
-                const ul = document.querySelector('#sidebar h3 + ul'); ul.innerHTML = ''; stations.forEach((station) => { const li = document.createElement('li'); li.textContent = station.name; li.dataset.section = `station_${station.name.toLowerCase().replace(/ /g, '_')}`; li.onclick = () => { document.querySelectorAll('#sidebar ul li').forEach(item => item.classList.remove('active')); li.classList.add('active'); document.getElementById("stations-section").style.display = "block"; document.getElementById("active-section").style.display = "none"; document.getElementById("simulation-section").style.display = "none"; document.getElementById("main-title").textContent = "Station Schedule Dashboard"; if(map) { setTimeout(() => map.invalidateSize(), 10); } displayIncomingTrains(station.name); }; ul.appendChild(li); }); }
-            window.showSection = function(section) { document.getElementById("stations-section").style.display = "none"; document.getElementById("active-section").style.display = "none"; document.getElementById("simulation-section").style.display = "none"; document.querySelectorAll('#sidebar ul li').forEach(li => li.classList.remove('active')); const activeLi = document.querySelector(`#sidebar li[data-section="${section}"]`); if(activeLi) activeLi.classList.add('active'); if (section === "stations") { document.getElementById("stations-section").style.display = "block"; document.getElementById("main-title").textContent = "Station Schedule Dashboard"; displayIncomingTrains('Old Delhi'); if(map) { setTimeout(() => map.invalidateSize(), 10); } } else if (section === "active") { document.getElementById("active-section").style.display = "block"; document.getElementById("main-title").textContent = "Scheduled Train Roster"; } else if (section === "simulation") { document.getElementById("simulation-section").style.display = "block"; document.getElementById("main-title").textContent = "AI Train Simulation"; } }
-            document.addEventListener('DOMContentLoaded', () => { populateStationSidebar(); displayLiveTrainDashboard(); showSection('simulation'); });
+                const stations = [{ name: 'Old Delhi' }, { name: 'Kalkaji' }, { name: 'New Delhi Rlway Station' }]; 
+                const ul = document.querySelector('#sidebar h3 + ul'); ul.innerHTML = '';
+                stations.forEach((station) => {
+                    const li = document.createElement('li');
+                    li.textContent = station.name;
+                    li.dataset.section = `station_${station.name.toLowerCase().replace(/\s+/g, '_')}`;
+                    li.onclick = () => {
+                        document.querySelectorAll('#sidebar ul li').forEach(item => item.classList.remove('active'));
+                        li.classList.add('active');
+                        document.getElementById("stations-section").style.display = "block";
+                        document.getElementById("active-section").style.display = "none";
+                        document.getElementById("simulation-section").style.display = "none";
+                        document.getElementById("main-title").textContent = "Station Schedule Dashboard";
+                        
+                        const coords = stationCoordinates[station.name];
+                        if (map && coords) {
+                            // *** MAP FIX: Invalidate size after showing the section, then set view ***
+                            setTimeout(() => {
+                                map.invalidateSize();
+                                map.setView([coords.lat, coords.lon], coords.zoom);
+                            }, 10);
+                        }
+                        
+                        displayIncomingTrains(station.name);
+                    };
+                    ul.appendChild(li);
+                });
+            }
+            
+            window.showSection = function(section) {
+                document.getElementById("stations-section").style.display = "none";
+                document.getElementById("active-section").style.display = "none";
+                document.getElementById("simulation-section").style.display = "none";
+                document.querySelectorAll('#sidebar ul li').forEach(li => li.classList.remove('active'));
+                const activeLi = document.querySelector(`#sidebar li[data-section="${section}"]`);
+                if(activeLi) activeLi.classList.add('active');
+                if (section === "stations") {
+                    document.getElementById("stations-section").style.display = "block";
+                    document.getElementById("main-title").textContent = "Station Schedule Dashboard";
+                    displayIncomingTrains('Old Delhi');
+                    if(map) {
+                        setTimeout(() => {
+                           map.invalidateSize();
+                           const coords = stationCoordinates['Old Delhi'];
+                           if (coords) map.setView([coords.lat, coords.lon], coords.zoom);
+                        }, 10);
+                    }
+                } else if (section === "active") {
+                    document.getElementById("active-section").style.display = "block";
+                    document.getElementById("main-title").textContent = "Active Train Roster";
+                } else if (section === "simulation") {
+                    document.getElementById("simulation-section").style.display = "block";
+                    document.getElementById("main-title").textContent = "AI Train Simulation";
+                }
+            }
+            
+            document.addEventListener('DOMContentLoaded', () => {
+                populateStationSidebar();
+                setInterval(displayLiveTrainDashboard, 1000);
+                showSection('simulation');
+            });
         })();
     </script>
 </body>
